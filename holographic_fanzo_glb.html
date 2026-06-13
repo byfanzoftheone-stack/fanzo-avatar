@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { margin: 0; padding: 0; }
+  body { background: #000; overflow: hidden; width: 100vw; height: 100vh; }
+  #loading {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    color: #42f5ef; font-family: monospace; font-size: 14px;
+    text-align: center;
+  }
+  #status {
+    position: absolute; bottom: 20px; left: 50%;
+    transform: translateX(-50%);
+    color: #42f5ef44; font-family: monospace; font-size: 10px;
+    letter-spacing: 2px;
+  }
+</style>
+</head>
+<body>
+<div id="loading">Loading Fanzo...</div>
+<div id="status">THE ONE COMPADRE</div>
+
+<script src="three.min.js"></script>
+<script src="GLTFLoader.js"></script>
+
+<script>
+// ── Scene ──────────────────────────────────────────────────────────
+const W = window.innerWidth, H = window.innerHeight;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, W / H, 0.01, 100);
+camera.position.set(0, 6, 22);
+camera.lookAt(0, 5, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x000000, 1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.4;
+renderer.outputEncoding = THREE.sRGBEncoding;
+document.body.appendChild(renderer.domElement);
+
+// ── Lighting ───────────────────────────────────────────────────────
+// Key light — cool blue from front-top
+const key = new THREE.PointLight(0x88ddff, 4.0, 40);
+key.position.set(2, 12, 10);
+scene.add(key);
+
+// Fill — soft from left
+const fill = new THREE.PointLight(0x4488aa, 2.0, 30);
+fill.position.set(-8, 6, 4);
+scene.add(fill);
+
+// Rim — behind for edge glow
+const rim = new THREE.PointLight(0x42f5ef, 3.0, 20);
+rim.position.set(0, 8, -10);
+scene.add(rim);
+
+// Under glow — cyan from platform
+const under = new THREE.PointLight(0x42f5ef, 2.5, 10);
+under.position.set(0, 0, 0);
+scene.add(under);
+
+// Ambient
+scene.add(new THREE.AmbientLight(0x112233, 1.2));
+
+// ── Platform glow ring ─────────────────────────────────────────────
+const ringGeo = new THREE.TorusGeometry(2.8, 0.08, 8, 96);
+const ringMat = new THREE.MeshBasicMaterial({
+  color: 0x42f5ef, transparent: true, opacity: 0.8
+});
+const ring = new THREE.Mesh(ringGeo, ringMat);
+ring.rotation.x = Math.PI / 2;
+ring.position.y = 0.1;
+scene.add(ring);
+
+// ── Holographic material override ──────────────────────────────────
+function applyHolographicMaterials(model) {
+  model.traverse((obj) => {
+    if (!obj.isMesh) return;
+
+    const originalMat = obj.material;
+
+    // Main holographic body material
+    const holoMat = new THREE.MeshPhysicalMaterial({
+      color: 0xc8f0ff,
+      transparent: true,
+      opacity: 0.82,
+      roughness: 0.12,
+      metalness: 0.05,
+      emissive: 0x1a6688,
+      emissiveIntensity: 0.55,
+      envMapIntensity: 1.2,
+    });
+
+    // Wireframe overlay
+    const wireMat = new THREE.MeshBasicMaterial({
+      color: 0x42f5ef,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.18,
+    });
+
+    // Back-face glow (larger shell)
+    const glowMat = new THREE.MeshBasicMaterial({
+      color: 0x42f5ef,
+      transparent: true,
+      opacity: 0.10,
+      side: THREE.BackSide,
+    });
+
+    // Apply main material
+    obj.material = holoMat;
+
+    // Add wireframe overlay
+    const wireObj = new THREE.Mesh(obj.geometry, wireMat);
+    obj.parent.add(wireObj);
+
+    // Add glow shell
+    const glowObj = new THREE.Mesh(obj.geometry, glowMat);
+    glowObj.scale.setScalar(1.04);
+    obj.parent.add(glowObj);
+  });
+}
+
+// ── Load GLB ───────────────────────────────────────────────────────
+const loader = new THREE.GLTFLoader();
+let fanzo = null;
+let mixer = null;
+
+loader.load(
+  'fanzo.glb',
+  (gltf) => {
+    fanzo = gltf.scene;
+
+    // Center and scale the model
+    const box = new THREE.Box3().setFromObject(fanzo);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const scale = 8 / maxDim;
+
+    fanzo.scale.setScalar(scale);
+    fanzo.position.x = -center.x * scale;
+    fanzo.position.y = -center.y * scale + 4;
+    fanzo.position.z = -center.z * scale;
+
+    // Apply holographic materials
+    applyHolographicMaterials(fanzo);
+
+    scene.add(fanzo);
+
+    // Wire up animations if any exist
+    if (gltf.animations && gltf.animations.length > 0) {
+      mixer = new THREE.AnimationMixer(fanzo);
+      const action = mixer.clipAction(gltf.animations[0]);
+      action.play();
+    }
+
+    document.getElementById('loading').style.display = 'none';
+  },
+  (progress) => {
+    const pct = Math.round((progress.loaded / progress.total) * 100);
+    document.getElementById('loading').textContent = `Loading Fanzo... ${pct}%`;
+  },
+  (error) => {
+    document.getElementById('loading').textContent = 'Error loading model';
+    console.error(error);
+  }
+);
+
+// ── Animation loop ─────────────────────────────────────────────────
+const clock = new THREE.Clock();
+let blinking = false;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+  const delta = clock.getDelta();
+
+  if (mixer) mixer.update(delta);
+
+  if (fanzo) {
+    // Gentle hover
+    fanzo.position.y = (fanzo.position.y - Math.sin((t - delta) * 1.3) * 0.06) +
+                        Math.sin(t * 1.3) * 0.06;
+
+    // Very slow sway
+    fanzo.rotation.y = Math.sin(t * 0.35) * 0.15;
+  }
+
+  // Ring pulse
+  ring.material.opacity = 0.5 + Math.sin(t * 2.0) * 0.3;
+  ring.scale.setScalar(1 + Math.sin(t * 2.0) * 0.025);
+
+  // Under light pulse
+  under.intensity = 2.0 + Math.sin(t * 2.0) * 0.8;
+
+  renderer.render(scene, camera);
+}
+
+animate();
+
+// ── Resize ─────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+});
+
+// ── Touch to rotate ────────────────────────────────────────────────
+let touchStartX = 0;
+document.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; });
+document.addEventListener('touchmove', e => {
+  if (!fanzo) return;
+  const dx = e.touches[0].clientX - touchStartX;
+  fanzo.rotation.y += dx * 0.01;
+  touchStartX = e.touches[0].clientX;
+});
+</script>
+</body>
+</html>
