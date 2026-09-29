@@ -72,80 +72,144 @@ ring.rotation.x = Math.PI / 2;
 ring.position.y = 0.1;
 scene.add(ring);
 
-function applyHolographicMaterials(model) {
-  model.traverse((obj) => {
-    if (!obj.isMesh) return;
+// ── Character config ───────────────────────────────────────────────
+const NAME = 'Echo';
+const MODEL_FILE = 'echo.glb';
+const HOLO = { body: 0xe8c8ff, emissive: 0x4a1a88, glow: 0xb44fff, speed: 1.1 };
 
+function applyHolographicMaterials(model) {
+  const meshes = [];
+  model.traverse((obj) => { if (obj.isMesh) meshes.push(obj); });
+
+  meshes.forEach((obj) => {
     const holoMat = new THREE.MeshPhysicalMaterial({
-      color: 0xe8c8ff,
+      color: HOLO.body,
       transparent: true,
       opacity: 0.82,
       roughness: 0.12,
       metalness: 0.05,
-      emissive: 0x4a1a88,
+      emissive: HOLO.emissive,
       emissiveIntensity: 0.55,
       envMapIntensity: 1.2,
     });
 
     const wireMat = new THREE.MeshBasicMaterial({
-      color: 0xb44fff,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.18,
+      color: HOLO.glow, wireframe: true, transparent: true, opacity: 0.18,
     });
 
+    // Glow shell: pushed out along normals in the shader so it follows the rig
     const glowMat = new THREE.MeshBasicMaterial({
-      color: 0xb44fff,
-      transparent: true,
-      opacity: 0.10,
-      side: THREE.BackSide,
+      color: HOLO.glow, transparent: true, opacity: 0.10, side: THREE.BackSide,
     });
+    glowMat.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        '#include <begin_vertex>\n  transformed += normalize(objectNormal) * 0.015;'
+      );
+    };
 
     obj.material = holoMat;
 
-    const wireObj = new THREE.Mesh(obj.geometry, wireMat);
-    obj.parent.add(wireObj);
-
-    const glowObj = new THREE.Mesh(obj.geometry, glowMat);
-    glowObj.scale.setScalar(1.04);
-    obj.parent.add(glowObj);
+    // Overlays must be skinned too, otherwise they freeze while the body moves
+    const makeOverlay = (mat) => {
+      let o;
+      if (obj.isSkinnedMesh) {
+        o = new THREE.SkinnedMesh(obj.geometry, mat);
+        o.bind(obj.skeleton, obj.bindMatrix);
+      } else {
+        o = new THREE.Mesh(obj.geometry, mat);
+      }
+      o.position.copy(obj.position);
+      o.quaternion.copy(obj.quaternion);
+      o.scale.copy(obj.scale);
+      o.frustumCulled = false;
+      obj.parent.add(o);
+    };
+    makeOverlay(wireMat);
+    makeOverlay(glowMat);
+    obj.frustumCulled = false;
   });
 }
 
+// ── Load GLB + movement ────────────────────────────────────────────
 const loader = new THREE.GLTFLoader();
-let echo = null;
+let model = null;
 let mixer = null;
+let actions = {};
+let baseAction = null;
+let busy = false;
+let touchStartX = 0, touchMoved = false, dragging = false, userYaw = 0;
+
+function playBase(name) {
+  const next = actions[name];
+  if (!next || next === baseAction) return;
+  if (baseAction) baseAction.fadeOut(0.4);
+  next.reset().fadeIn(0.4).play();
+  baseAction = next;
+}
+
+// One-shot gesture, then glide back to idle
+function gesture(name) {
+  const a = actions[name];
+  if (!a || busy) return;
+  busy = true;
+  if (baseAction) baseAction.fadeOut(0.25);
+  a.reset();
+  a.setLoop(THREE.LoopOnce, 1);
+  a.clampWhenFinished = true;
+  a.fadeIn(0.25).play();
+  const done = (e) => {
+    if (e.action !== a) return;
+    mixer.removeEventListener('finished', done);
+    a.fadeOut(0.35);
+    const idle = actions['Idle_15'];
+    if (idle) { idle.reset().fadeIn(0.35).play(); baseAction = idle; }
+    busy = false;
+  };
+  mixer.addEventListener('finished', done);
+}
 
 loader.load(
-  'echo.glb',
+  MODEL_FILE,
   (gltf) => {
-    echo = gltf.scene;
+    model = gltf.scene;
 
-    const box = new THREE.Box3().setFromObject(echo);
+    // Rigged meshes: use the mesh's own bounds (the armature's 0.01 scale lives in the bones)
+    let box = null;
+    model.traverse((o) => {
+      if (o.isSkinnedMesh) {
+        o.geometry.computeBoundingBox();
+        box = box ? box.union(o.geometry.boundingBox) : o.geometry.boundingBox.clone();
+      }
+    });
+    if (!box) box = new THREE.Box3().setFromObject(model);
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
     const scale = 8 / maxDim;
 
-    echo.scale.setScalar(scale);
-    echo.position.x = -center.x * scale;
-    echo.position.y = -center.y * scale + 4;
-    echo.position.z = -center.z * scale;
+    model.scale.setScalar(scale);
+    model.position.x = -center.x * scale;
+    model.position.y = -center.y * scale + 4;
+    model.position.z = -center.z * scale;
 
-    applyHolographicMaterials(echo);
-    scene.add(echo);
+    applyHolographicMaterials(model);
+    scene.add(model);
 
     if (gltf.animations && gltf.animations.length > 0) {
-      mixer = new THREE.AnimationMixer(echo);
-      const action = mixer.clipAction(gltf.animations[0]);
-      action.play();
+      mixer = new THREE.AnimationMixer(model);
+      gltf.animations.forEach((clip) => { actions[clip.name] = mixer.clipAction(clip); });
+      if (actions['Idle_15']) playBase('Idle_15');
+      else mixer.clipAction(gltf.animations[0]).play();
+      setTimeout(() => gesture('Big_Wave_Hello'), 800);
     }
 
     document.getElementById('loading').style.display = 'none';
   },
   (progress) => {
+    if (!progress.total) return;
     const pct = Math.round((progress.loaded / progress.total) * 100);
-    document.getElementById('loading').textContent = `Loading Echo... ${pct}%`;
+    document.getElementById('loading').textContent = `Loading ${NAME}... ${pct}%`;
   },
   (error) => {
     document.getElementById('loading').textContent = 'Error loading model';
@@ -153,19 +217,32 @@ loader.load(
   }
 );
 
+// Every so often, do a small "helping" gesture so they never just stand there
+const GESTURES = ['Talk_with_Hands_Open', 'Talk_with_Left_Hand_on_Hip', 'Discuss_While_Moving'];
+function scheduleGesture() {
+  setTimeout(() => {
+    if (!document.hidden) gesture(GESTURES[Math.floor(Math.random() * GESTURES.length)]);
+    scheduleGesture();
+  }, 9000 + Math.random() * 9000);
+}
+scheduleGesture();
+
+// ── Animation loop ─────────────────────────────────────────────────
 const clock = new THREE.Clock();
+let t = 0;
+let baseY = null;
 
 function animate() {
   requestAnimationFrame(animate);
-  const t = clock.getElapsedTime();
-  const delta = clock.getDelta();
+  const delta = Math.min(clock.getDelta(), 0.1); // read delta once per frame
+  t += delta;
 
   if (mixer) mixer.update(delta);
 
-  if (echo) {
-    echo.position.y = (echo.position.y - Math.sin((t - delta) * 1.1) * 0.055) +
-                       Math.sin(t * 1.1) * 0.055;
-    echo.rotation.y = Math.sin(t * 0.32) * 0.12;
+  if (model) {
+    if (baseY === null) baseY = model.position.y;
+    model.position.y = baseY + Math.sin(t * HOLO.speed) * 0.055;   // gentle hover
+    if (!dragging) model.rotation.y = userYaw + Math.sin(t * 0.32) * 0.12; // slow sway
   }
 
   ring.material.opacity = 0.5 + Math.sin(t * 1.8) * 0.3;
@@ -184,14 +261,18 @@ window.addEventListener('resize', () => {
   renderer.setSize(w, h);
 });
 
-let touchStartX = 0;
-document.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; });
+// ── Touch: drag to rotate, tap to wave ─────────────────────────────
+document.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; touchMoved = false; dragging = true; });
 document.addEventListener('touchmove', e => {
-  if (!echo) return;
+  if (!model) return;
   const dx = e.touches[0].clientX - touchStartX;
-  echo.rotation.y += dx * 0.01;
+  if (Math.abs(dx) > 3) touchMoved = true;
+  userYaw += dx * 0.01;
+  model.rotation.y = userYaw;
   touchStartX = e.touches[0].clientX;
 });
+document.addEventListener('touchend', () => { dragging = false; if (!touchMoved) gesture('Big_Wave_Hello'); });
+document.addEventListener('click', () => gesture('Big_Wave_Hello'));
 </script>
 </body>
 </html>
